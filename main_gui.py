@@ -43,8 +43,9 @@ def compute_mean_file(folder_path: str, base_name: str, N: int):
 class MeasurementGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("GPIB I-V Measurement System")
-        self.root.geometry("1200x800")
+        self.root.title("I-V Measurement System")
+        self.root.state('zoomed')  # Windows; starts the window maximized
+        self.root.minsize(1200, 850)  # minimum size (adjust as you like)
         # Device connections
         self.tek371 = None
         self.keithley = None
@@ -57,7 +58,7 @@ class MeasurementGUI:
         main_frame.grid(row=0, column=0, sticky=tk.N + tk.S + tk.E + tk.W)
 
         # Title spanning both columns
-        title = ttk.Label(main_frame, text="GPIB I-V Measurement System",
+        title = ttk.Label(main_frame, text="I-V Measurement System",
                           font=('Helvetica', 16, 'bold'))
         title.grid(row=0, column=0, columnspan=2, pady=(0, 10), sticky=tk.W)
 
@@ -88,7 +89,7 @@ class MeasurementGUI:
 
         ttk.Label(conn_frame, text="Tek371:").grid(row=3, column=0, sticky=tk.W)
         self.tek_addr = ttk.Entry(conn_frame, width=25)
-        self.tek_addr.insert(0, "GPIB0::23::INSTR")
+        self.tek_addr.insert(0, "GPIB::23")
         self.tek_addr.grid(row=3, column=1, sticky=tk.W)
 
         ttk.Label(conn_frame, text="Keithley 2400:").grid(row=3, column=2, sticky=tk.W)
@@ -162,23 +163,19 @@ class MeasurementGUI:
         self.stop_btn.grid(row=0, column=1, padx=5)
         ttk.Button(btn_frame, text="Clear Plot",
                    command=self.clear_plot).grid(row=0, column=2, padx=5)
-        btn_frame.columnconfigure(0, weight=0)
-        btn_frame.columnconfigure(1, weight=0)
-        btn_frame.columnconfigure(2, weight=0)
 
-        # ===== Status + Progress (LEFT, below buttons) =====
+        # ===== Status (LEFT, one column wide): title, full-width text, progress below =====
         status_frame = ttk.LabelFrame(left_frame, text="Status", padding="10")
         status_frame.grid(row=4, column=0, sticky=tk.W + tk.E, pady=5)
-        ttk.Label(status_frame, text="Status:").grid(row=0, column=0, sticky=tk.W)
-        self.status_label = ttk.Label(status_frame, text="Ready", relief=tk.SUNKEN, width=35)
-        self.status_label.grid(row=0, column=1, sticky=tk.W, padx=5)
-        # Progress bar with percentage label
-        self.progress = ttk.Progressbar(status_frame, length=300, mode='determinate')
-        self.progress.grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
-        self.progress_label = ttk.Label(status_frame, text="0%", width=5, anchor='e')
-        self.progress_label.grid(row=1, column=1, sticky=tk.W, padx=8)
-        status_frame.columnconfigure(0, weight=0)
-        status_frame.columnconfigure(1, weight=1)
+        status_frame.columnconfigure(0, weight=1)
+        # Status text uses the whole left column width
+        self.status_label = ttk.Label(status_frame, text="Ready", relief=tk.SUNKEN, anchor='w', justify='left')
+        self.status_label.grid(row=0, column=0, sticky=tk.E + tk.W)
+        # Progress bar below the status text
+        self.progress = ttk.Progressbar(status_frame, length=400, mode='determinate')
+        self.progress.grid(row=1, column=0, sticky=tk.E + tk.W, pady=(6, 0))
+        # Wrap the status text to the frame width
+        status_frame.bind('<Configure>', self._on_status_resize)
 
         # ===== Right Side: Plot (fills) =====
         right_frame.columnconfigure(0, weight=1)
@@ -200,6 +197,13 @@ class MeasurementGUI:
         # ===== Top-level grid weights =====
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
+
+    # Dynamically wrap the status text to the status frame width
+    def _on_status_resize(self, event):
+        try:
+            self.status_label.configure(wraplength=max(event.width - 20, 100))
+        except Exception:
+            pass
 
     def scan_gpib(self):
         try:
@@ -223,8 +227,16 @@ class MeasurementGUI:
             self.update_status("Connecting to Tek371...")
             addr = self.tek_addr.get()
             self.tek371 = Tek371(addr)
+            # Connectivity test: query instrument ID
+            idn = None
+            try:
+                idn = self.tek371.id_string()
+            except Exception:
+                idn = None
+            if not idn:
+                raise RuntimeError("Tek371 did not respond to ID query")
             self.tek_status.config(text="Connected", foreground='green')
-            self.update_status("Tek371 connected successfully")
+            self.update_status(f"Tek371 connected successfully: {idn}")
         except Exception as e:
             self.tek_status.config(text="Error", foreground='red')
             messagebox.showerror("Tek371 Connection Error", str(e))
@@ -235,8 +247,18 @@ class MeasurementGUI:
             self.update_status("Connecting to Keithley 2400...")
             addr = self.keithley_addr.get()
             self.keithley = Keithley2400(addr)
+            # Connectivity test: try idn/id then *IDN?
+            idn = None
+            try:
+                idn = getattr(self.keithley, 'idn', None) or getattr(self.keithley, 'id', None)
+                if not idn:
+                    idn = self.keithley.ask("*IDN?")
+            except Exception:
+                idn = None
+            if not idn:
+                raise RuntimeError("Keithley 2400 did not respond to *IDN? or idn")
             self.keithley_status.config(text="Connected", foreground='green')
-            self.update_status("Keithley 2400 connected successfully")
+            self.update_status(f"Keithley connected successfully: {idn}")
         except Exception as e:
             self.keithley_status.config(text="Error", foreground='red')
             messagebox.showerror("Keithley 2400 Connection Error", str(e))
@@ -254,7 +276,6 @@ class MeasurementGUI:
 
     def _update_progress(self, percent: float):
         self.progress['value'] = percent
-        self.progress_label.config(text=f"{int(percent)}%")
         self.root.update_idletasks()
 
     def clear_plot(self):
@@ -337,9 +358,9 @@ class MeasurementGUI:
                 if not self.measurement_running:
                     self.update_status("Measurement stopped by user")
                     break
+                # Progress BEFORE starting curve i
+                self._update_progress(((i - 1) / num_curves) * 100)
                 self.update_status(f"Measuring curve {i}/{num_curves}...")
-                percent = (i / num_curves) * 100
-                self._update_progress(percent)
                 # Set collector supply and perform sweep
                 self.tek371.set_collector_supply(vce_pct)
                 self.tek371.set_measurement_mode("SWE")
@@ -361,6 +382,8 @@ class MeasurementGUI:
                 # Reset SRQ
                 self.tek371.discard_and_disable_all_events()
                 self.tek371.enable_srq_event()
+                # Progress AFTER completing curve i
+                self._update_progress((i / num_curves) * 100)
 
             # Cleanup
             self.keithley.disable_source()
@@ -378,6 +401,7 @@ class MeasurementGUI:
                 self.fig.tight_layout()
                 self.canvas.draw()
                 self.update_status(f"Measurement complete! Data saved to {folder}")
+                # Only now set 100%
                 self._update_progress(100)
         except Exception as e:
             self.update_status("Measurement error")
