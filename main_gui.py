@@ -89,7 +89,8 @@ class MeasurementGUI:
         self.tek_addr.grid(row=2, column=1, sticky=tk.W)
         ttk.Button(conn_frame, text="Connect",
                    command=self.connect_tek).grid(row=2, column=2, padx=5)
-        self.tek_status = ttk.Label(conn_frame, text="Not connected", foreground='gray')
+        # Fixed width to avoid layout shifts
+        self.tek_status = ttk.Label(conn_frame, text="Not connected", foreground='gray', width=12)
         self.tek_status.grid(row=2, column=3, sticky=tk.W)
 
         # Keithley
@@ -99,7 +100,8 @@ class MeasurementGUI:
         self.keithley_addr.grid(row=3, column=1, sticky=tk.W)
         ttk.Button(conn_frame, text="Connect",
                    command=self.connect_keithley).grid(row=3, column=2, padx=5)
-        self.keithley_status = ttk.Label(conn_frame, text="Not connected", foreground='gray')
+        # Fixed width to avoid layout shifts
+        self.keithley_status = ttk.Label(conn_frame, text="Not connected", foreground='gray', width=12)
         self.keithley_status.grid(row=3, column=3, sticky=tk.W)
 
         # ===== Measurement Parameters (LEFT) =====
@@ -162,7 +164,8 @@ class MeasurementGUI:
         status_frame = ttk.Frame(right_frame)
         status_frame.grid(row=0, column=0, sticky=tk.E + tk.W, pady=(0, 5))
         ttk.Label(status_frame, text="Status:").grid(row=0, column=0, sticky=tk.W)
-        self.status_label = ttk.Label(status_frame, text="Ready", relief=tk.SUNKEN)
+        # Fixed-width status to avoid shifting
+        self.status_label = ttk.Label(status_frame, text="Ready", relief=tk.SUNKEN, width=40)
         self.status_label.grid(row=0, column=1, sticky=tk.E + tk.W, padx=5)
         status_frame.columnconfigure(1, weight=1)
         self.progress = ttk.Progressbar(status_frame, length=300, mode='determinate')
@@ -208,37 +211,36 @@ class MeasurementGUI:
                 self.update_status("No GPIB devices found")
             self.gpib_text.config(state='disabled')
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to scan GPIB: {str(e)}")
+            messagebox.showerror("Error scanning GPIB", str(e))
 
     def connect_tek(self):
         try:
             self.update_status("Connecting to Tek371...")
             addr = self.tek_addr.get()
             self.tek371 = Tek371(addr)
-            idn = self.tek371.id_string()
-            self.tek_status.config(text=f"✓ Connected: {idn}", foreground='green')
+            # If needed, you can query idn, but keep status minimal to avoid shifting
+            # idn = self.tek371.id_string()
+            self.tek_status.config(text="Connected", foreground='green')
             self.update_status("Tek371 connected successfully")
         except Exception as e:
-            self.tek_status.config(text=f"✗ Error: {str(e)}", foreground='red')
-            self.update_status(f"Failed to connect Tek371: {str(e)}")
+            # Keep UI compact: show only "Error" in red on the label
+            self.tek_status.config(text="Error", foreground='red')
+            # Show the full error string in a popup
+            messagebox.showerror("Tek371 Connection Error", str(e))
+            self.update_status("Tek371 connection failed")
 
     def connect_keithley(self):
         try:
             self.update_status("Connecting to Keithley 2400...")
             addr = self.keithley_addr.get()
             self.keithley = Keithley2400(addr)
-            # Some drivers expose idn; fallback to ask("*IDN?") if needed
-            try:
-                idn = getattr(self.keithley, 'id', None) or getattr(self.keithley, 'idn', None)
-                if not idn:
-                    idn = self.keithley.ask("*IDN?")
-            except Exception:
-                idn = "Keithley 2400"
-            self.keithley_status.config(text=f"✓ Connected: {idn}", foreground='green')
+            # Keep status minimal to avoid shifting
+            self.keithley_status.config(text="Connected", foreground='green')
             self.update_status("Keithley 2400 connected successfully")
         except Exception as e:
-            self.keithley_status.config(text=f"✗ Error: {str(e)}", foreground='red')
-            self.update_status(f"Failed to connect Keithley: {str(e)}")
+            self.keithley_status.config(text="Error", foreground='red')
+            messagebox.showerror("Keithley 2400 Connection Error", str(e))
+            self.update_status("Keithley connection failed")
 
     def browse_folder(self):
         folder = filedialog.askdirectory()
@@ -371,7 +373,7 @@ class MeasurementGUI:
                 self.update_status(f"Measurement complete! Data saved to {folder}")
                 self.progress['value'] = 100
         except Exception as e:
-            self.update_status(f"Error: {str(e)}")
+            self.update_status("Measurement error")
             messagebox.showerror("Measurement Error", str(e))
             if self.keithley:
                 try:
