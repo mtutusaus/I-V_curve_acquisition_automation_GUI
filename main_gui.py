@@ -492,7 +492,7 @@ class MeasurementGUI:
                 mean_path = compute_mean_file(folder, base_filename, num_curves)
                 # Plot mean
                 mean_data = pd.read_csv(mean_path)
-                self.ax.plot(mean_data.iloc[:, 0], mean_data.iloc[:, 1], 'r-', linewidth=2, label='Mean')
+                self.ax.plot(mean_data.iloc[:, 0], mean_data.iloc[:, 1], 'r-', linewidth=1.5, label='Mean')
                 self.ax.legend()
                 self.fig.tight_layout()
                 self.canvas.draw()
