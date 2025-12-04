@@ -7,13 +7,16 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import os
 import csv
 import warnings
+import json
 from time import sleep
 from threading import Thread
+from datetime import datetime
 from tek371 import Tek371
 from pymeasure.instruments.keithley import Keithley2400
 
 # Suppress PyVISA warning
 warnings.filterwarnings("ignore", message="read string doesn't end with termination characters")
+
 
 def compute_mean_file(folder_path: str, base_name: str, N: int):
     """Compute per-row mean of Voltage and Current across N files"""
@@ -40,6 +43,7 @@ def compute_mean_file(folder_path: str, base_name: str, N: int):
         writer.writerows(mean_rows)
     return out_path
 
+
 class MeasurementGUI:
     def __init__(self, root):
         self.root = root
@@ -63,7 +67,7 @@ class MeasurementGUI:
         title.grid(row=0, column=0, columnspan=2, pady=(0, 10), sticky=tk.W)
 
         # Two columns: left controls, right plot
-        left_frame  = ttk.Frame(main_frame)
+        left_frame = ttk.Frame(main_frame)
         right_frame = ttk.Frame(main_frame)
         left_frame.grid(row=1, column=0, sticky=tk.N + tk.W, padx=(0, 10))
         right_frame.grid(row=1, column=1, sticky=tk.N + tk.S + tk.E + tk.W)
@@ -76,34 +80,28 @@ class MeasurementGUI:
         # ===== Device Connection (LEFT) =====
         conn_frame = ttk.LabelFrame(left_frame, text="Device Connection", padding="10")
         conn_frame.grid(row=0, column=0, sticky=tk.W + tk.E, pady=5)
-
         ttk.Button(conn_frame, text="Scan GPIB Bus",
                    command=self.scan_gpib).grid(row=0, column=0, pady=5, sticky=tk.W)
         ttk.Label(conn_frame, text="Available devices:").grid(row=0, column=1, sticky=tk.W)
         self.gpib_text = scrolledtext.ScrolledText(conn_frame, height=3, width=50, state='disabled')
         self.gpib_text.grid(row=1, column=0, columnspan=4, pady=5, sticky=tk.W)
-
         # --- Subtitle: Instrument Addresses (after scan, before device connect rows) ---
         addrs_label = ttk.Label(conn_frame, text="Instrument Addresses", font=('Helvetica', 10, 'bold'))
         addrs_label.grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(8, 2))
-
         ttk.Label(conn_frame, text="Tek371:").grid(row=3, column=0, sticky=tk.W)
         self.tek_addr = ttk.Entry(conn_frame, width=25)
         self.tek_addr.insert(0, "GPIB::23")
         self.tek_addr.grid(row=3, column=1, sticky=tk.W)
-
         ttk.Label(conn_frame, text="Keithley 2400:").grid(row=3, column=2, sticky=tk.W)
         self.keithley_addr = ttk.Entry(conn_frame, width=20)
         self.keithley_addr.insert(0, "GPIB::24")
         self.keithley_addr.grid(row=3, column=3, sticky=tk.W)
-
         # --- Device connect rows (no 'Address' wording) ---
         ttk.Label(conn_frame, text="Tek371:").grid(row=4, column=0, sticky=tk.W, pady=(8, 5))
         ttk.Button(conn_frame, text="Connect",
                    command=self.connect_tek).grid(row=4, column=1, padx=5, sticky=tk.W)
         self.tek_status = ttk.Label(conn_frame, text="Not connected", foreground='gray', width=12)
         self.tek_status.grid(row=4, column=2, sticky=tk.W)
-
         ttk.Label(conn_frame, text="Keithley 2400:").grid(row=5, column=0, sticky=tk.W, pady=5)
         ttk.Button(conn_frame, text="Connect",
                    command=self.connect_keithley).grid(row=5, column=1, padx=5, sticky=tk.W)
@@ -129,7 +127,7 @@ class MeasurementGUI:
             entry.grid(row=i, column=1, sticky=tk.W, padx=5)
             self.param_entries[label] = entry
 
-        # ===== File Settings (LEFT) =====
+            # ===== File Settings (LEFT) =====
         file_frame = ttk.LabelFrame(left_frame, text="File Settings", padding="10")
         file_frame.grid(row=2, column=0, sticky=tk.W, pady=5)
         ttk.Label(file_frame, text="Output Folder:").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -151,6 +149,11 @@ class MeasurementGUI:
             entry.insert(0, default)
             entry.grid(row=i, column=1, sticky=tk.W, padx=5)
             self.file_entries[label] = entry
+            # Export/Import Settings buttons (below file entries)
+        ttk.Button(file_frame, text="Export Settings", command=self.export_settings).grid(row=i + 1, column=0,
+                                                                                          sticky=tk.W, pady=(8, 0))
+        ttk.Button(file_frame, text="Import Settings", command=self.import_settings).grid(row=i + 1, column=1,
+                                                                                          sticky=tk.W, pady=(8, 0))
 
         # ===== Control Buttons (LEFT) =====
         btn_frame = ttk.Frame(left_frame)
@@ -198,13 +201,106 @@ class MeasurementGUI:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
-    # Dynamically wrap the status text to the status frame width
+        # Dynamically wrap the status text to the status frame width
+
     def _on_status_resize(self, event):
         try:
             self.status_label.configure(wraplength=max(event.width - 20, 100))
         except Exception:
             pass
 
+            # ---------- Export/Import Settings ----------
+
+    def collect_settings(self):
+        # Addresses
+        addrs = {
+            "tek371": self.tek_addr.get(),
+            "keithley2400": self.keithley_addr.get(),
+        }
+        # Measurement params (store by label for easy mapping)
+        meas = {label: self.param_entries[label].get() for label in self.param_entries}
+        # File settings
+        file_set = {
+            "output_folder": self.folder_entry.get(),
+            "DUT Name:": self.file_entries["DUT Name:"].get(),
+            "Device ID:": self.file_entries["Device ID:"].get(),
+            "Vge Applied (V):": self.file_entries["Vge Applied (V):"].get(),
+            "Temperature (°C):": self.file_entries["Temperature (°C):"].get(),
+            "Number of Curves:": self.file_entries["Number of Curves:"].get(),
+        }
+        base_filename = f"{file_set['DUT Name:']}_{file_set['Device ID:']}_{file_set['Vge Applied (V):']}V_{file_set['Temperature (°C):']}C"
+        return {
+            "addresses": addrs,
+            "measurement": meas,
+            "file": file_set,
+            "base_filename_example": base_filename,
+            "timestamp": datetime.now().isoformat(timespec='seconds'),
+        }
+
+    def apply_settings(self, settings: dict):
+        try:
+            # Addresses
+            if "addresses" in settings:
+                addrs = settings["addresses"]
+                if "tek371" in addrs:
+                    self.tek_addr.delete(0, tk.END)
+                    self.tek_addr.insert(0, addrs["tek371"])
+                if "keithley2400" in addrs:
+                    self.keithley_addr.delete(0, tk.END)
+                    self.keithley_addr.insert(0, addrs["keithley2400"])
+            # Measurement params
+            if "measurement" in settings:
+                meas = settings["measurement"]
+                for label, entry in self.param_entries.items():
+                    if label in meas:
+                        entry.delete(0, tk.END)
+                        entry.insert(0, str(meas[label]))
+            # File settings
+            if "file" in settings:
+                fs = settings["file"]
+                if "output_folder" in fs:
+                    self.folder_entry.delete(0, tk.END)
+                    self.folder_entry.insert(0, fs["output_folder"])
+                for label, entry in self.file_entries.items():
+                    if label in fs:
+                        entry.delete(0, tk.END)
+                        entry.insert(0, str(fs[label]))
+            self.update_status("Settings applied successfully")
+        except Exception as e:
+            messagebox.showerror("Apply Settings Error", str(e))
+
+    def export_settings(self):
+        try:
+            data = self.collect_settings()
+            default_name = f"settings_{data['file']['DUT Name:']}_{data['file']['Device ID:']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            path = filedialog.asksaveasfilename(
+                title="Export Settings",
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json")],
+                initialfile=default_name,
+            )
+            if path:
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2)
+                self.update_status(f"Settings exported to {path}")
+        except Exception as e:
+            messagebox.showerror("Export Settings Error", str(e))
+
+    def import_settings(self):
+        try:
+            path = filedialog.askopenfilename(
+                title="Import Settings",
+                filetypes=[("JSON files", "*.json")]
+            )
+            if path:
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                self.apply_settings(data)
+                self.update_status(f"Settings imported from {path}")
+        except Exception as e:
+            messagebox.showerror("Import Settings Error", str(e))
+
+    # ---------- Existing functionality ----------
     def scan_gpib(self):
         try:
             rm = pyvisa.ResourceManager()
@@ -358,7 +454,7 @@ class MeasurementGUI:
                 if not self.measurement_running:
                     self.update_status("Measurement stopped by user")
                     break
-                # Progress BEFORE starting curve i
+                    # Progress BEFORE starting curve i
                 self._update_progress(((i - 1) / num_curves) * 100)
                 self.update_status(f"Measuring curve {i}/{num_curves}...")
                 # Set collector supply and perform sweep
@@ -368,7 +464,7 @@ class MeasurementGUI:
                     self.update_status(f"Sweep {i}/{num_curves} complete, reading data...")
                 else:
                     raise TimeoutError(f"Sweep {i}/{num_curves} timeout")
-                # Save curve
+                    # Save curve
                 filename = os.path.join(folder, f"{base_filename}_{i}.csv")
                 self.tek371.read_curve(filename)
                 # Plot the curve
@@ -379,13 +475,13 @@ class MeasurementGUI:
                     self.canvas.draw()
                 except Exception as e:
                     print(f"Plot error: {e}")
-                # Reset SRQ
+                    # Reset SRQ
                 self.tek371.discard_and_disable_all_events()
                 self.tek371.enable_srq_event()
                 # Progress AFTER completing curve i
                 self._update_progress((i / num_curves) * 100)
 
-            # Cleanup
+                # Cleanup
             self.keithley.disable_source()
             self.keithley.beep(4000, 2)
             self.tek371.disable_srq_event()
@@ -396,7 +492,7 @@ class MeasurementGUI:
                 mean_path = compute_mean_file(folder, base_filename, num_curves)
                 # Plot mean
                 mean_data = pd.read_csv(mean_path)
-                self.ax.plot(mean_data.iloc[:, 0], mean_data.iloc[:, 1], 'r-', linewidth=2.5, label='Mean')
+                self.ax.plot(mean_data.iloc[:, 0], mean_data.iloc[:, 1], 'r-', linewidth=2, label='Mean')
                 self.ax.legend()
                 self.fig.tight_layout()
                 self.canvas.draw()
@@ -415,6 +511,7 @@ class MeasurementGUI:
             self.measurement_running = False
             self.start_btn.config(state='normal')
             self.stop_btn.config(state='disabled')
+
 
 if __name__ == "__main__":
     root = tk.Tk()
