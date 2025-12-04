@@ -43,9 +43,8 @@ def compute_mean_file(folder_path: str, base_name: str, N: int):
 class MeasurementGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("I-V Measurement System")
-        self.root.state('zoomed')  # Windows; starts the window maximized
-        self.root.minsize(1200, 850)  # minimum size (adjust as you like)
+        self.root.title("GPIB I-V Measurement System")
+        self.root.geometry("1200x800")
         # Device connections
         self.tek371 = None
         self.keithley = None
@@ -58,7 +57,7 @@ class MeasurementGUI:
         main_frame.grid(row=0, column=0, sticky=tk.N + tk.S + tk.E + tk.W)
 
         # Title spanning both columns
-        title = ttk.Label(main_frame, text="I-V Measurement System",
+        title = ttk.Label(main_frame, text="GPIB I-V Measurement System",
                           font=('Helvetica', 16, 'bold'))
         title.grid(row=0, column=0, columnspan=2, pady=(0, 10), sticky=tk.W)
 
