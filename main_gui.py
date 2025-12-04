@@ -44,7 +44,7 @@ class MeasurementGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("I-V Measurement System")
-        self.root.geometry("1200x850")  # initial size
+        self.root.state('zoomed')  # Windows; starts the window maximized
         self.root.minsize(1200, 850)  # minimum size (adjust as you like)
         # Device connections
         self.tek371 = None
