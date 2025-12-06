@@ -1,4 +1,4 @@
-# I-V curve acquisition automation
+# I-V curve acquisition automation GUI
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![PyVISA](https://img.shields.io/badge/instrument-PyVISA-blue.svg)
