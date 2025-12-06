@@ -9,7 +9,7 @@
 ---
 ## **Development**
 
-This GUI was built entirely through AI-assisted development (M365 Copilot). The underlying curve tracer automation comes from my [curve-tracer]([link](https://github.com/mtutusaus/curve-tracer)) repository.
+This GUI was built entirely through AI-assisted development (M365 Copilot). The underlying curve tracer automation comes from my [curve-tracer](https://github.com/mtutusaus/curve-tracer) repository.
 
 ---
 ## **License**
