@@ -6,7 +6,7 @@
 ![AI-Assisted](https://img.shields.io/badge/Development-AI--Assisted-purple)
 [![License: CC BY-NC-SA 4.0](https://licensebuttons.net/l/by-nc-sa/4.0/88x31.png)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
-Graphical interface for automated I-V curve acquisition of MOS gated power devices using a **Tektronix TEK371** curve tracer and a **Keitlhey2400 SMU**.
+Graphical interface for automated I-V curve acquisition of MOS gated power devices using a **Tektronix TEK371** curve tracer and a **Keitlhey2400 SMU** at different junction temperatures set by a hot plate.
 
 This GUI provides a user-friendly interface for the [curve-tracer](https://github.com/mtutusaus/curve-tracer) automation framework, enabling easy transistor characterization.
 
