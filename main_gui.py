@@ -1,11 +1,6 @@
-# basic_gui_fixed300_v2.py
+# basic_gui_fixed300_v5.py
 # Single-file GUI: constrained scales, fixed 300 W, numeric-safe validation
-# - Horizontal scale choices (V/div): 0.1, 0.2, 0.5, 1, 2, 5
-# - Vertical scale choices (A/div): 0.5, 1, 2, 5 (for 300 W)
-# - Peak power fixed to 300 W (no UI control)
-# - VGE read-only and synced to gate bias voltage
-# - Start gating + amber warning
-# - Thread-safe callbacks and full mainloop
+# UX update: clear plot on start; disable Clear Plot during measurement; guard clear_plot during run
 
 from __future__ import annotations
 
@@ -59,16 +54,15 @@ class Defaults:
     tek_address: str = "GPIB::23"
     k24_address: str = "GPIB::24"
 
-    smu_v: float = 20.0
+    smu_v: float = 15.0
     smu_i_comp_mA: float = 1.0  # max 1 mA
     tr_h: float = 0.2  # default 0.2 V/div
-    tr_v: float = 1.0  # default 1 A/div (for 300W)
+    tr_v: float = 1.0  # default 1 A/div
     tr_vce_pct: float = 100.0
     tr_peak_power: int = 300  # fixed 300 W
 
-    dut: str = "H40ER5S"
-    dev: str = "dev10"
-    vge: float = 20.0
+    dut: str = "dut"
+    dev: str = "dev0"
     temp_c: float = 25.0
     ncurves: int = 10
 
@@ -327,7 +321,10 @@ class MeasurementGUI:
         self.var_tr_h = tk.StringVar(value=str(Defaults().tr_h))
         self.var_tr_v = tk.StringVar(value=str(Defaults().tr_v))
         self.var_tr_vce = tk.StringVar(value=str(Defaults().tr_vce_pct))
+        # File vars
         self.var_vge = tk.StringVar(value=self.var_smu_v.get())
+        self.var_temp = tk.StringVar(value=str(Defaults().temp_c))
+        self.var_ncurves = tk.StringVar(value=str(Defaults().ncurves))
 
         self._build_widgets()
         self._update_connect_state()
@@ -446,13 +443,15 @@ class MeasurementGUI:
         e_vge = ttk.Entry(filef, width=15, textvariable=self.var_vge, state="readonly")
         e_vge.grid(row=3, column=1, sticky=tk.W, padx=5); self.file_entries[UI.L_VGE] = e_vge
 
+        # Temperature Spinbox (°C)
         ttk.Label(filef, text=UI.L_TEMP).grid(row=4, column=0, sticky=tk.W, pady=2)
-        e_temp = ttk.Entry(filef, width=15); e_temp.insert(0, str(Defaults().temp_c))
-        e_temp.grid(row=4, column=1, sticky=tk.W, padx=5); self.file_entries[UI.L_TEMP] = e_temp
+        self.sb_temp = tk.Spinbox(filef, from_=-55, to=250, increment=1, width=15, textvariable=self.var_temp)
+        self.sb_temp.grid(row=4, column=1, sticky=tk.W, padx=5); self.file_entries[UI.L_TEMP] = self.sb_temp
 
+        # Number of curves Spinbox
         ttk.Label(filef, text=UI.L_NCURVES).grid(row=5, column=0, sticky=tk.W, pady=2)
-        e_ncurves = ttk.Entry(filef, width=15); e_ncurves.insert(0, str(Defaults().ncurves))
-        e_ncurves.grid(row=5, column=1, sticky=tk.W, padx=5); self.file_entries[UI.L_NCURVES] = e_ncurves
+        self.sb_ncurves = tk.Spinbox(filef, from_=1, to=200, increment=1, width=15, textvariable=self.var_ncurves)
+        self.sb_ncurves.grid(row=5, column=1, sticky=tk.W, padx=5); self.file_entries[UI.L_NCURVES] = self.sb_ncurves
 
         ttk.Button(filef, text="Export Settings", command=self.export_settings).grid(row=6, column=0, sticky=tk.W, pady=(8, 0))
         ttk.Button(filef, text="Import Settings", command=self.import_settings).grid(row=6, column=1, sticky=tk.W, pady=(8, 0))
@@ -462,7 +461,8 @@ class MeasurementGUI:
         self.start_btn.grid(row=0, column=0, padx=5)
         self.stop_btn = ttk.Button(btns, text="Stop", command=self.stop_measurement, state="disabled")
         self.stop_btn.grid(row=0, column=1, padx=5)
-        ttk.Button(btns, text="Clear Plot", command=self.clear_plot).grid(row=0, column=2, padx=5)
+        self.clear_btn = ttk.Button(btns, text="Clear Plot", command=self.clear_plot)
+        self.clear_btn.grid(row=0, column=2, padx=5)
 
         status = ttk.LabelFrame(left, text="Status", padding="10")
         status.grid(row=4, column=0, sticky=tk.W + tk.E, pady=5); status.columnconfigure(0, weight=1)
@@ -487,9 +487,14 @@ class MeasurementGUI:
             self.var_vge.set(self.var_smu_v.get())
         self.var_smu_v.trace_add("write", _sync_vge)
 
+    # ----- Plot helpers -----
     def _style_axes(self) -> None:
         self.ax.clear(); self.ax.set_xlabel("Voltage (V)"); self.ax.set_ylabel("Current (A)")
         self.ax.set_title("I-V Measurement Data"); self.ax.grid(True)
+
+    def _clear_plot_only(self) -> None:
+        """Clear axes without changing Status or Progress."""
+        self._style_axes(); self.fig.tight_layout(); self.canvas.draw()
 
     def _on_status_resize(self, event) -> None:
         try:
@@ -513,7 +518,6 @@ class MeasurementGUI:
 
     def collect_settings(self) -> Dict:
         addrs = {UI.K_TEK: self.tek_addr.get(), UI.K_K24: self.keithley_addr.get()}
-        # Use string values from the UI for export (consistent formatting)
         meas = {
             UI.L_SMU_V: self.var_smu_v.get(),
             UI.L_SMU_I_COMP: self.var_i_comp.get(),
@@ -527,8 +531,8 @@ class MeasurementGUI:
             UI.L_DUT: self.file_entries[UI.L_DUT].get(),
             UI.L_DEV: self.file_entries[UI.L_DEV].get(),
             UI.L_VGE: self.var_vge.get(),
-            UI.L_TEMP: self.file_entries[UI.L_TEMP].get(),
-            UI.L_NCURVES: self.file_entries[UI.L_NCURVES].get(),
+            UI.L_TEMP: self.var_temp.get(),
+            UI.L_NCURVES: self.var_ncurves.get(),
         }
         base_filename = f"{file_set[UI.L_DUT]}_{file_set[UI.L_DEV]}_{self.var_vge.get()}V_{file_set[UI.L_TEMP]}C"
         return {
@@ -562,10 +566,8 @@ class MeasurementGUI:
                     w = self.file_entries[UI.L_DUT]; w.delete(0, tk.END); w.insert(0, str(fs[UI.L_DUT]))
                 if UI.L_DEV in fs:
                     w = self.file_entries[UI.L_DEV]; w.delete(0, tk.END); w.insert(0, str(fs[UI.L_DEV]))
-                if UI.L_TEMP in fs:
-                    w = self.file_entries[UI.L_TEMP]; w.delete(0, tk.END); w.insert(0, str(fs[UI.L_TEMP]))
-                if UI.L_NCURVES in fs:
-                    w = self.file_entries[UI.L_NCURVES]; w.delete(0, tk.END); w.insert(0, str(fs[UI.L_NCURVES]))
+                if UI.L_TEMP in fs: self.var_temp.set(str(fs[UI.L_TEMP]))
+                if UI.L_NCURVES in fs: self.var_ncurves.set(str(fs[UI.L_NCURVES]))
                 if UI.L_VGE in fs:
                     self.var_smu_v.set(str(fs[UI.L_VGE]))
             self._set_status("Settings applied successfully")
@@ -650,7 +652,11 @@ class MeasurementGUI:
             self._update_connect_state()
 
     def clear_plot(self) -> None:
-        self._style_axes(); self.fig.tight_layout(); self.canvas.draw(); self._set_status("Plot cleared"); self._set_progress(0.0)
+        # Ignore clear requests during a measurement (button should be disabled anyway)
+        if self.stop_btn['state'] == 'normal':
+            return
+        self._style_axes(); self.fig.tight_layout(); self.canvas.draw();
+        self._set_status("Plot cleared"); self._set_progress(0.0)
 
     def _plot_csv(self, path: Path) -> None:
         try:
@@ -686,8 +692,8 @@ class MeasurementGUI:
             dut=self.file_entries[UI.L_DUT].get(),
             dev=self.file_entries[UI.L_DEV].get(),
             vge=float(self.var_vge.get()),
-            temp_c=float(self.file_entries[UI.L_TEMP].get()),
-            ncurves=int(self.file_entries[UI.L_NCURVES].get()),
+            temp_c=float(self.var_temp.get()),
+            ncurves=int(self.var_ncurves.get()),
         )
         return RunSettings(addresses=addrs, measurement=p, file=f)
 
@@ -698,8 +704,14 @@ class MeasurementGUI:
             settings = self._parse_settings(); settings.validate()
         except Exception as e:
             messagebox.showerror("Invalid Parameters", str(e)); return
+
+        # Clear plot immediately at start (without touching status/progress)
+        self._clear_plot_only()
+
         self.controller = MeasurementController(self.tek371, self.keithley)
-        self.start_btn.config(state="disabled"); self.stop_btn.config(state="normal")
+        self.start_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
+        self.clear_btn.config(state="disabled")
 
         def on_status(msg: str) -> None: self._post(lambda: self._set_status(msg))
         def on_progress(pct: float) -> None: self._post(lambda: self._set_progress(pct))
@@ -712,7 +724,7 @@ class MeasurementGUI:
             except Exception as e:
                 self._post(lambda: (self._set_status("Measurement error"), messagebox.showerror("Measurement Error", str(e))))
             finally:
-                self._post(lambda: (self.start_btn.config(state="normal"), self.stop_btn.config(state="disabled")))
+                self._post(lambda: (self.start_btn.config(state="normal"), self.stop_btn.config(state="disabled"), self.clear_btn.config(state="normal")))
         self.worker_thread = Thread(target=work, daemon=True); self.worker_thread.start()
 
     def stop_measurement(self) -> None:
