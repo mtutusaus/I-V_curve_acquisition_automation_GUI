@@ -386,9 +386,11 @@ class MeasurementGUI:
         self._update_progress(0)
 
     def start_measurement(self):
-        if self.tek371 is None or self.keithley is None:
+        # Require both instruments to be actively connected (status labels)
+        if self.tek_status.cget('text') != 'Connected' or self.keithley_status.cget('text') != 'Connected':
             messagebox.showerror("Error", "Please connect both devices before starting!")
             return
+
         folder = self.folder_entry.get()
         if not folder:
             messagebox.showerror("Error", "Please select an output folder!")
