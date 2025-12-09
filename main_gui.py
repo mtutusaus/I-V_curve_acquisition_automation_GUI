@@ -86,7 +86,8 @@ class MeasurementGUI:
         self.gpib_text = scrolledtext.ScrolledText(conn_frame, height=3, width=50, state='disabled')
         self.gpib_text.grid(row=1, column=0, columnspan=4, pady=5, sticky=tk.W)
         # --- Subtitle: Instrument Addresses (after scan, before device connect rows) ---
-        addrs_label = ttk.Label(conn_frame, text="Instrument Addresses", font=('Helvetica', 10, 'bold'))
+        addrs_label = ttk.Label(conn_frame, text="Instrument Addresses",
+                                font=('Helvetica', 10, 'bold'))
         addrs_label.grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(8, 2))
         ttk.Label(conn_frame, text="Tek371:").grid(row=3, column=0, sticky=tk.W)
         self.tek_addr = ttk.Entry(conn_frame, width=25)
@@ -105,7 +106,8 @@ class MeasurementGUI:
         ttk.Label(conn_frame, text="Keithley 2400:").grid(row=5, column=0, sticky=tk.W, pady=5)
         ttk.Button(conn_frame, text="Connect",
                    command=self.connect_keithley).grid(row=5, column=1, padx=5, sticky=tk.W)
-        self.keithley_status = ttk.Label(conn_frame, text="Not connected", foreground='gray', width=12)
+        self.keithley_status = ttk.Label(conn_frame, text="Not connected", foreground='gray',
+                                         width=12)
         self.keithley_status.grid(row=5, column=2, sticky=tk.W)
 
         # ===== Measurement Parameters (LEFT) =====
@@ -130,6 +132,11 @@ class MeasurementGUI:
             # ===== File Settings (LEFT) =====
         file_frame = ttk.LabelFrame(left_frame, text="File Settings", padding="10")
         file_frame.grid(row=2, column=0, sticky=tk.W, pady=5)
+        # Amber banner (always visible until both devices connected)
+        self.banner_label = tk.Label(left_frame,
+                                     text="Connect Tek371 and Keithley 2400 to enable Start measurement button",
+                                     bg="#FFC107", fg="black")
+        self.banner_label.grid(row=3, column=0, sticky=tk.E + tk.W, pady=(5, 5))
         ttk.Label(file_frame, text="Output Folder:").grid(row=0, column=0, sticky=tk.W, pady=2)
         self.folder_entry = ttk.Entry(file_frame, width=35)
         self.folder_entry.grid(row=0, column=1, sticky=tk.W, padx=5)
@@ -150,14 +157,20 @@ class MeasurementGUI:
             entry.grid(row=i, column=1, sticky=tk.W, padx=5)
             self.file_entries[label] = entry
             # Export/Import Settings buttons (below file entries)
-        ttk.Button(file_frame, text="Export Settings", command=self.export_settings).grid(row=i + 1, column=0,
-                                                                                          sticky=tk.W, pady=(8, 0))
-        ttk.Button(file_frame, text="Import Settings", command=self.import_settings).grid(row=i + 1, column=1,
-                                                                                          sticky=tk.W, pady=(8, 0))
+        ttk.Button(file_frame, text="Export Settings", command=self.export_settings).grid(row=i + 1,
+                                                                                          column=0,
+                                                                                          sticky=tk.W,
+                                                                                          pady=(
+                                                                                          8, 0))
+        ttk.Button(file_frame, text="Import Settings", command=self.import_settings).grid(row=i + 1,
+                                                                                          column=1,
+                                                                                          sticky=tk.W,
+                                                                                          pady=(
+                                                                                          8, 0))
 
         # ===== Control Buttons (LEFT) =====
         btn_frame = ttk.Frame(left_frame)
-        btn_frame.grid(row=3, column=0, pady=10, sticky=tk.W + tk.E)
+        btn_frame.grid(row=4, column=0, pady=10, sticky=tk.W + tk.E)
         self.start_btn = ttk.Button(btn_frame, text="Start Measurement",
                                     command=self.start_measurement)
         self.start_btn.grid(row=0, column=0, padx=5)
@@ -169,10 +182,11 @@ class MeasurementGUI:
 
         # ===== Status (LEFT, one column wide): title, full-width text, progress below =====
         status_frame = ttk.LabelFrame(left_frame, text="Status", padding="10")
-        status_frame.grid(row=4, column=0, sticky=tk.W + tk.E, pady=5)
+        status_frame.grid(row=5, column=0, sticky=tk.W + tk.E, pady=5)
         status_frame.columnconfigure(0, weight=1)
         # Status text uses the whole left column width
-        self.status_label = ttk.Label(status_frame, text="Ready", relief=tk.SUNKEN, anchor='w', justify='left')
+        self.status_label = ttk.Label(status_frame, text="Ready", relief=tk.SUNKEN, anchor='w',
+                                      justify='left')
         self.status_label.grid(row=0, column=0, sticky=tk.E + tk.W)
         # Progress bar below the status text
         self.progress = ttk.Progressbar(status_frame, length=400, mode='determinate')
@@ -200,6 +214,9 @@ class MeasurementGUI:
         # ===== Top-level grid weights =====
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
+
+        # Initialize banner visibility
+        self.update_banner_visibility()
 
         # Dynamically wrap the status text to the status frame width
 
@@ -300,6 +317,18 @@ class MeasurementGUI:
         except Exception as e:
             messagebox.showerror("Import Settings Error", str(e))
 
+    def update_banner_visibility(self):
+        try:
+            both_connected = (
+                        self.tek_status.cget('text') == 'Connected' and self.keithley_status.cget(
+                    'text') == 'Connected')
+            if both_connected:
+                self.banner_label.grid_remove()
+            else:
+                self.banner_label.grid(row=3, column=0, sticky=tk.E + tk.W, pady=(5, 5))
+        except Exception:
+            pass
+
     # ---------- Existing functionality ----------
     def scan_gpib(self):
         try:
@@ -333,10 +362,12 @@ class MeasurementGUI:
                 raise RuntimeError("Tek371 did not respond to ID query")
             self.tek_status.config(text="Connected", foreground='green')
             self.update_status(f"Tek371 connected successfully: {idn}")
+            self.update_banner_visibility()
         except Exception as e:
             self.tek_status.config(text="Error", foreground='red')
             messagebox.showerror("Tek371 Connection Error", str(e))
             self.update_status("Tek371 connection failed")
+            self.update_banner_visibility()
 
     def connect_keithley(self):
         try:
@@ -355,10 +386,12 @@ class MeasurementGUI:
                 raise RuntimeError("Keithley 2400 did not respond to *IDN? or idn")
             self.keithley_status.config(text="Connected", foreground='green')
             self.update_status(f"Keithley connected successfully: {idn}")
+            self.update_banner_visibility()
         except Exception as e:
             self.keithley_status.config(text="Error", foreground='red')
             messagebox.showerror("Keithley 2400 Connection Error", str(e))
             self.update_status("Keithley connection failed")
+            self.update_banner_visibility()
 
     def browse_folder(self):
         folder = filedialog.askdirectory()
@@ -386,11 +419,9 @@ class MeasurementGUI:
         self._update_progress(0)
 
     def start_measurement(self):
-        # Require both instruments to be actively connected (status labels)
-        if self.tek_status.cget('text') != 'Connected' or self.keithley_status.cget('text') != 'Connected':
+        if self.tek371 is None or self.keithley is None:
             messagebox.showerror("Error", "Please connect both devices before starting!")
             return
-
         folder = self.folder_entry.get()
         if not folder:
             messagebox.showerror("Error", "Please select an output folder!")
@@ -472,7 +503,8 @@ class MeasurementGUI:
                 # Plot the curve
                 try:
                     data = pd.read_csv(filename)
-                    self.ax.plot(data.iloc[:, 0], data.iloc[:, 1], alpha=0.5, linewidth=1, color='blue')
+                    self.ax.plot(data.iloc[:, 0], data.iloc[:, 1], alpha=0.5, linewidth=1,
+                                 color='blue')
                     self.fig.tight_layout()
                     self.canvas.draw()
                 except Exception as e:
@@ -494,7 +526,8 @@ class MeasurementGUI:
                 mean_path = compute_mean_file(folder, base_filename, num_curves)
                 # Plot mean
                 mean_data = pd.read_csv(mean_path)
-                self.ax.plot(mean_data.iloc[:, 0], mean_data.iloc[:, 1], 'r-', linewidth=1.5, label='Mean')
+                self.ax.plot(mean_data.iloc[:, 0], mean_data.iloc[:, 1], 'r-', linewidth=1.5,
+                             label='Mean')
                 self.ax.legend()
                 self.fig.tight_layout()
                 self.canvas.draw()
