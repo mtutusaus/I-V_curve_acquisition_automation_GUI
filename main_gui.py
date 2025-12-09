@@ -82,7 +82,7 @@ class Defaults:
 H_CHOICES = ("0.1", "0.2", "0.5", "1", "2", "5")
 V_CHOICES = ("0.5", "1", "2", "5")
 
-# Numeric allowed sets for robust validation
+# Numeric allowed sets for robust validation (needed because comboboxes return float)
 ALLOWED_H = {0.1, 0.2, 0.5, 1.0, 2.0, 5.0}
 ALLOWED_V = {0.5, 1.0, 2.0, 5.0}
 
