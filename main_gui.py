@@ -1,21 +1,23 @@
-
-# basic_gui.py
-# Single-file, refactored and thread-safe I-V measurement GUI
+# basic_gui_fixed300_v2.py
+# Single-file GUI: constrained scales, fixed 300 W, numeric-safe validation
+# - Horizontal scale choices (V/div): 0.1, 0.2, 0.5, 1, 2, 5
+# - Vertical scale choices (A/div): 0.5, 1, 2, 5 (for 300 W)
+# - Peak power fixed to 300 W (no UI control)
+# - VGE read-only and synced to gate bias voltage
+# - Start gating + amber warning
+# - Thread-safe callbacks and full mainloop
 
 from __future__ import annotations
 
-import os
-import csv
 import json
 import warnings
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from threading import Thread, Event
 from time import sleep
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional
 
-# --- Third-party / instruments ---
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 
@@ -27,34 +29,29 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from tek371 import Tek371
 from pymeasure.instruments.keithley import Keithley2400
 
-# --- Global warnings ---
 warnings.filterwarnings("ignore", message="read string doesn't end with termination characters")
 
 
-# =========================
-# 1) Constants & Config
-# =========================
 class UI:
     TITLE = "I-V Measurement System"
 
-    # Parameter labels (kept stable for export/import compatibility)
-    L_SMU_V = "SMU Source Voltage (V):"
-    L_SMU_I_COMP = "SMU Compliance Current (A):"
+    L_SMU_V = "Gate bias voltage (V):"
+    L_SMU_I_COMP = "Gate bias compliance current (mA):"
     L_TR_H = "Tracer Horizontal Scale (V/div):"
     L_TR_V = "Tracer Vertical Scale (A/div):"
     L_TR_VCE = "Tracer VCE Percentage (%):"
-    L_TR_PK_PWR = "Tracer Peak Power (W):"
+    L_TR_PK_PWR = "Tracer Peak Power (W):"  # fixed value shown only
 
-    # File labels
     L_DUT = "DUT Name:"
     L_DEV = "Device ID:"
-    L_VGE = "Vge Applied (V):"
+    L_VGE = "Gate bias applied (V):"
     L_TEMP = "Temperature (°C):"
     L_NCURVES = "Number of Curves:"
 
-    # Address keys (for JSON)
     K_TEK = "tek371"
     K_K24 = "keithley2400"
+
+    WARN_CONNECT = "Must connect both equipments to enable start measurement"
 
 
 @dataclass
@@ -63,11 +60,11 @@ class Defaults:
     k24_address: str = "GPIB::24"
 
     smu_v: float = 20.0
-    smu_i_comp: float = 1e-3
-    tr_h: float = 200e-3
-    tr_v: float = 5.0
+    smu_i_comp_mA: float = 1.0  # max 1 mA
+    tr_h: float = 0.2  # default 0.2 V/div
+    tr_v: float = 1.0  # default 1 A/div (for 300W)
     tr_vce_pct: float = 100.0
-    tr_peak_power: int = 300
+    tr_peak_power: int = 300  # fixed 300 W
 
     dut: str = "H40ER5S"
     dev: str = "dev10"
@@ -76,15 +73,22 @@ class Defaults:
     ncurves: int = 10
 
 
-# =========================
-# 2) Utilities
-# =========================
+# UI choices (strings for Comboboxes)
+H_CHOICES = ("0.1", "0.2", "0.5", "1", "2", "5")
+V_CHOICES = ("0.5", "1", "2", "5")
+
+# Numeric allowed sets for robust validation
+ALLOWED_H = {0.1, 0.2, 0.5, 1.0, 2.0, 5.0}
+ALLOWED_V = {0.5, 1.0, 2.0, 5.0}
+
+def _is_allowed(value: float, allowed: set[float], eps: float = 1e-9) -> bool:
+    return any(abs(value - a) <= eps for a in allowed)
+
+
 def try_zoomed(root: tk.Tk) -> None:
-    """Maximize window if supported."""
     try:
         root.state("zoomed")
     except Exception:
-        # Fallback: set a reasonable size if zoomed is unsupported
         root.geometry("1200x850")
 
 
@@ -108,10 +112,6 @@ def ensure_folder_writable(path: Path) -> None:
 
 
 def compute_mean_file(folder_path: Path, base_name: str, N: int) -> Path:
-    """
-    Compute per-row mean of the first two columns across N CSV files.
-    Output is written to <folder>/mean/<base_name>_MEAN.csv
-    """
     filepaths = [folder_path / f"{base_name}_{i}.csv" for i in range(1, N + 1)]
     if not all(p.exists() for p in filepaths):
         missing = [str(p.name) for p in filepaths if not p.exists()]
@@ -124,12 +124,10 @@ def compute_mean_file(folder_path: Path, base_name: str, N: int) -> Path:
             raise ValueError(f"{p.name} must have at least two columns (Voltage, Current)")
         dfs.append(df.iloc[:, :2].copy())
 
-    # Sanity check: equal number of rows
     nrows = {len(df) for df in dfs}
     if len(nrows) != 1:
         raise ValueError("Curve CSVs have different row counts; cannot compute row-wise mean.")
 
-    # Concatenate on columns and take mean pairwise
     concat_v = pd.concat([df.iloc[:, 0] for df in dfs], axis=1)
     concat_i = pd.concat([df.iloc[:, 1] for df in dfs], axis=1)
     mean_v = concat_v.mean(axis=1)
@@ -144,9 +142,6 @@ def compute_mean_file(folder_path: Path, base_name: str, N: int) -> Path:
     return out_path
 
 
-# =========================================
-# 3) Settings models (+ parsing & validation)
-# =========================================
 @dataclass
 class AddressSettings:
     tek371: str
@@ -156,20 +151,30 @@ class AddressSettings:
 @dataclass
 class MeasurementParams:
     smu_v: float
-    smu_i_comp: float
+    smu_i_comp_mA: float  # UI in mA
     tr_h: float
     tr_v: float
     tr_vce_pct: float
-    tr_peak_power: int
+    tr_peak_power: int  # fixed to 300
 
     def validate(self) -> None:
         require_positive(UI.L_SMU_V, self.smu_v)
-        require_positive(UI.L_SMU_I_COMP, self.smu_i_comp)
-        require_positive(UI.L_TR_H, self.tr_h)
-        require_positive(UI.L_TR_V, self.tr_v)
-        require_positive(UI.L_TR_PK_PWR, float(self.tr_peak_power))
-        if not (0 < self.tr_vce_pct <= 1000):
-            raise ValueError(f"{UI.L_TR_VCE} must be in (0, 1000] (got {self.tr_vce_pct}).")
+        require_positive(UI.L_SMU_I_COMP, self.smu_i_comp_mA)
+        if self.smu_i_comp_mA > 1.0:
+            raise ValueError(f"{UI.L_SMU_I_COMP} must be ≤ 1.0 mA (got {self.smu_i_comp_mA} mA).")
+        # Numeric validation against allowed sets
+        if not _is_allowed(self.tr_h, ALLOWED_H):
+            raise ValueError(f"{UI.L_TR_H} must be one of {sorted(ALLOWED_H)} V/div (got {self.tr_h}).")
+        if not _is_allowed(self.tr_v, ALLOWED_V):
+            raise ValueError(f"{UI.L_TR_V} must be one of {sorted(ALLOWED_V)} A/div (got {self.tr_v}).")
+        if not (0.0 <= self.tr_vce_pct <= 100.0):
+            raise ValueError(f"{UI.L_TR_VCE} must be between 0 and 100 (got {self.tr_vce_pct}).")
+        if self.tr_peak_power != 300:
+            raise ValueError("Peak power is fixed to 300 W for this GUI.")
+
+    @property
+    def smu_i_comp_A(self) -> float:
+        return self.smu_i_comp_mA / 1000.0
 
 
 @dataclass
@@ -183,7 +188,6 @@ class FileParams:
 
     @property
     def base_filename(self) -> str:
-        # Preserve original naming semantics
         return f"{self.dut}_{self.dev}_{self.vge}V_{self.temp_c}C"
 
     def validate(self) -> None:
@@ -192,7 +196,6 @@ class FileParams:
         if not self.dev:
             raise ValueError(f"{UI.L_DEV} cannot be empty")
         require_positive(UI.L_VGE, self.vge)
-        # Temperature may be <= 0, so only numeric check is implied by float conversion.
         require_positive(UI.L_NCURVES, float(self.ncurves))
         ensure_folder_writable(self.output_folder)
 
@@ -208,15 +211,7 @@ class RunSettings:
         self.file.validate()
 
 
-# =========================================
-# 4) Measurement Controller (no Tk calls)
-# =========================================
 class MeasurementController:
-    """
-    Encapsulates the measurement sequence, calling provided callbacks
-    for status/progress/plot actions. No direct Tkinter access here.
-    """
-
     def __init__(self, tek: Tek371, k24: Keithley2400) -> None:
         self.tek = tek
         self.k24 = k24
@@ -225,20 +220,16 @@ class MeasurementController:
     def stop(self) -> None:
         self._stop_event.set()
 
-    def run(
-        self,
-        settings: RunSettings,
-        on_status: Callable[[str], None],
-        on_progress: Callable[[float], None],
-        on_plot_csv: Callable[[Path], None],
-        on_plot_mean_csv: Callable[[Path], None],
-    ) -> None:
+    def run(self, settings: RunSettings,
+            on_status: Callable[[str], None],
+            on_progress: Callable[[float], None],
+            on_plot_csv: Callable[[Path], None],
+            on_plot_mean_csv: Callable[[Path], None]) -> None:
         settings.validate()
         folder = settings.file.output_folder
         base = settings.file.base_filename
         N = settings.file.ncurves
 
-        # Configure instruments
         on_status("Configuring Keithley 2400...")
         self._configure_keithley(settings)
         sleep(0.2)
@@ -269,22 +260,18 @@ class MeasurementController:
                 self.tek.read_curve(str(filename))
                 on_plot_csv(filename)
 
-                # Reset SRQ for next iteration
                 self.tek.discard_and_disable_all_events()
                 self.tek.enable_srq_event()
 
                 on_progress((i / N) * 100.0)
 
-            # Compute and plot mean if not stopped
             if not self._stop_event.is_set():
                 on_status("Computing mean curve...")
                 mean_path = compute_mean_file(folder, base, N)
                 on_plot_mean_csv(mean_path)
                 on_status(f"Measurement complete! Data saved to {folder}")
                 on_progress(100.0)
-
         finally:
-            # Cleanup regardless of success/failure/stop
             try:
                 self.k24.disable_source()
             except Exception:
@@ -298,7 +285,6 @@ class MeasurementController:
             except Exception:
                 pass
 
-    # ----- Internal helpers (instrument config) -----
     def _configure_keithley(self, settings: RunSettings) -> None:
         p = settings.measurement
         self.k24.reset()
@@ -307,12 +293,12 @@ class MeasurementController:
         self.k24.use_front_terminals()
         self.k24.source_mode = "voltage"
         self.k24.source_voltage = p.smu_v
-        self.k24.compliance_current = p.smu_i_comp
+        self.k24.compliance_current = p.smu_i_comp_A
 
     def _configure_tek(self, settings: RunSettings) -> None:
         p = settings.measurement
         self.tek.initialize()
-        self.tek.set_peak_power(p.tr_peak_power)
+        self.tek.set_peak_power(300)  # fixed
         self.tek.set_step_number(0)
         self.tek.set_step_voltage(200e-3)
         self.tek.set_step_offset(0)
@@ -322,9 +308,6 @@ class MeasurementController:
         self.tek.set_display_mode("STO")
 
 
-# =========================
-# 5) GUI
-# =========================
 class MeasurementGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -332,24 +315,29 @@ class MeasurementGUI:
         try_zoomed(self.root)
         self.root.minsize(1200, 850)
 
-        # Instruments
         self.tek371: Optional[Tek371] = None
         self.keithley: Optional[Keithley2400] = None
 
-        # Controller / thread
         self.controller: Optional[MeasurementController] = None
         self.worker_thread: Optional[Thread] = None
 
-        self._build_widgets()
+        # Param variables
+        self.var_smu_v = tk.StringVar(value=str(Defaults().smu_v))
+        self.var_i_comp = tk.StringVar(value=str(Defaults().smu_i_comp_mA))
+        self.var_tr_h = tk.StringVar(value=str(Defaults().tr_h))
+        self.var_tr_v = tk.StringVar(value=str(Defaults().tr_v))
+        self.var_tr_vce = tk.StringVar(value=str(Defaults().tr_vce_pct))
+        self.var_vge = tk.StringVar(value=self.var_smu_v.get())
 
-    # ----- UI construction -----
+        self._build_widgets()
+        self._update_connect_state()
+
     def _build_widgets(self) -> None:
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=tk.N + tk.S + tk.E + tk.W)
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
-        # Title
         title = ttk.Label(main_frame, text=UI.TITLE, font=("Helvetica", 16, "bold"))
         title.grid(row=0, column=0, columnspan=2, pady=(0, 10), sticky=tk.W)
 
@@ -360,7 +348,6 @@ class MeasurementGUI:
         main_frame.columnconfigure(1, weight=1)
         main_frame.rowconfigure(1, weight=1)
 
-        # ----- Connection frame -----
         conn = ttk.LabelFrame(left, text="Device Connection", padding="10")
         conn.grid(row=0, column=0, sticky=tk.W + tk.E, pady=5)
 
@@ -372,48 +359,70 @@ class MeasurementGUI:
         addrs_label = ttk.Label(conn, text="Instrument Addresses", font=("Helvetica", 10, "bold"))
         addrs_label.grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(8, 2))
 
-        ttk.Label(conn, text="Tek371:").grid(row=3, column=0, sticky=tk.W)
+        self.warn_label = ttk.Label(
+            conn,
+            text=UI.WARN_CONNECT,
+            foreground="#8a6d3b",
+            background="#fcf8e3",
+            padding=5,
+        )
+        self.warn_label.grid(row=3, column=0, columnspan=4, sticky=tk.W + tk.E, pady=(2, 8))
+
+        ttk.Label(conn, text="Tek371:").grid(row=4, column=0, sticky=tk.W)
         self.tek_addr = ttk.Entry(conn, width=25)
         self.tek_addr.insert(0, Defaults().tek_address)
-        self.tek_addr.grid(row=3, column=1, sticky=tk.W)
+        self.tek_addr.grid(row=4, column=1, sticky=tk.W)
 
-        ttk.Label(conn, text="Keithley 2400:").grid(row=3, column=2, sticky=tk.W)
+        ttk.Label(conn, text="Keithley 2400:").grid(row=4, column=2, sticky=tk.W)
         self.keithley_addr = ttk.Entry(conn, width=20)
         self.keithley_addr.insert(0, Defaults().k24_address)
-        self.keithley_addr.grid(row=3, column=3, sticky=tk.W)
+        self.keithley_addr.grid(row=4, column=3, sticky=tk.W)
 
-        ttk.Label(conn, text="Tek371:").grid(row=4, column=0, sticky=tk.W, pady=(8, 5))
-        ttk.Button(conn, text="Connect", command=self.connect_tek).grid(row=4, column=1, padx=5, sticky=tk.W)
+        ttk.Label(conn, text="Tek371:").grid(row=5, column=0, sticky=tk.W, pady=(8, 5))
+        ttk.Button(conn, text="Connect", command=self.connect_tek).grid(row=5, column=1, padx=5, sticky=tk.W)
         self.tek_status = ttk.Label(conn, text="Not connected", foreground="gray", width=12)
-        self.tek_status.grid(row=4, column=2, sticky=tk.W)
+        self.tek_status.grid(row=5, column=2, sticky=tk.W)
 
-        ttk.Label(conn, text="Keithley 2400:").grid(row=5, column=0, sticky=tk.W, pady=5)
-        ttk.Button(conn, text="Connect", command=self.connect_keithley).grid(row=5, column=1, padx=5, sticky=tk.W)
+        ttk.Label(conn, text="Keithley 2400:").grid(row=6, column=0, sticky=tk.W, pady=5)
+        ttk.Button(conn, text="Connect", command=self.connect_keithley).grid(row=6, column=1, padx=5, sticky=tk.W)
         self.keithley_status = ttk.Label(conn, text="Not connected", foreground="gray", width=12)
-        self.keithley_status.grid(row=5, column=2, sticky=tk.W)
+        self.keithley_status.grid(row=6, column=2, sticky=tk.W)
 
-        # ----- Measurement params -----
         param = ttk.LabelFrame(left, text="Measurement Parameters", padding="10")
         param.grid(row=1, column=0, sticky=tk.W, pady=5)
 
-        self.param_entries: Dict[str, ttk.Entry] = {}
-        for i, (label, default) in enumerate(
-            [
-                (UI.L_SMU_V, str(Defaults().smu_v)),
-                (UI.L_SMU_I_COMP, str(Defaults().smu_i_comp)),
-                (UI.L_TR_H, str(Defaults().tr_h)),
-                (UI.L_TR_V, str(Defaults().tr_v)),
-                (UI.L_TR_VCE, str(Defaults().tr_vce_pct)),
-                (UI.L_TR_PK_PWR, str(Defaults().tr_peak_power)),
-            ]
-        ):
-            ttk.Label(param, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
-            e = ttk.Entry(param, width=15)
-            e.insert(0, default)
-            e.grid(row=i, column=1, sticky=tk.W, padx=5)
-            self.param_entries[label] = e
+        # Gate bias voltage (Spinbox)
+        ttk.Label(param, text=UI.L_SMU_V).grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.sb_smu_v = tk.Spinbox(param, from_=0.0, to=100.0, increment=0.1, width=12, textvariable=self.var_smu_v)
+        self.sb_smu_v.grid(row=0, column=1, sticky=tk.W, padx=5)
 
-        # ----- File settings -----
+        # Gate bias compliance current mA (Spinbox)
+        ttk.Label(param, text=UI.L_SMU_I_COMP).grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.sb_i_comp = tk.Spinbox(param, from_=0.01, to=1.0, increment=0.01, width=12, textvariable=self.var_i_comp)
+        self.sb_i_comp.grid(row=1, column=1, sticky=tk.W, padx=5)
+
+        # Horizontal scale (Combobox, fixed choices)
+        ttk.Label(param, text=UI.L_TR_H).grid(row=2, column=0, sticky=tk.W, pady=2)
+        self.cb_tr_h = ttk.Combobox(param, values=H_CHOICES, width=11, state="readonly", textvariable=self.var_tr_h)
+        self.cb_tr_h.set(str(Defaults().tr_h))
+        self.cb_tr_h.grid(row=2, column=1, sticky=tk.W, padx=5)
+
+        # Vertical scale (Combobox, fixed choices)
+        ttk.Label(param, text=UI.L_TR_V).grid(row=3, column=0, sticky=tk.W, pady=2)
+        self.cb_tr_v = ttk.Combobox(param, values=V_CHOICES, width=11, state="readonly", textvariable=self.var_tr_v)
+        self.cb_tr_v.set(str(Defaults().tr_v))
+        self.cb_tr_v.grid(row=3, column=1, sticky=tk.W, padx=5)
+
+        # VCE % (Spinbox)
+        ttk.Label(param, text=UI.L_TR_VCE).grid(row=4, column=0, sticky=tk.W, pady=2)
+        self.sb_vce = tk.Spinbox(param, from_=0, to=100, increment=1, width=12, textvariable=self.var_tr_vce)
+        self.sb_vce.grid(row=4, column=1, sticky=tk.W, padx=5)
+
+        # Peak power label (fixed 300 W, not editable)
+        ttk.Label(param, text=UI.L_TR_PK_PWR).grid(row=5, column=0, sticky=tk.W, pady=2)
+        self.lbl_pp = ttk.Label(param, text="300", foreground="#333")
+        self.lbl_pp.grid(row=5, column=1, sticky=tk.W, padx=5)
+
         filef = ttk.LabelFrame(left, text="File Settings", padding="10")
         filef.grid(row=2, column=0, sticky=tk.W, pady=5)
 
@@ -422,71 +431,65 @@ class MeasurementGUI:
         self.folder_entry.grid(row=0, column=1, sticky=tk.W, padx=5)
         ttk.Button(filef, text="Browse", command=self.browse_folder).grid(row=0, column=2)
 
-        self.file_entries: Dict[str, ttk.Entry] = {}
-        for i, (label, default) in enumerate(
-            [
-                (UI.L_DUT, Defaults().dut),
-                (UI.L_DEV, Defaults().dev),
-                (UI.L_VGE, str(Defaults().vge)),
-                (UI.L_TEMP, str(Defaults().temp_c)),
-                (UI.L_NCURVES, str(Defaults().ncurves)),
-            ],
-            start=1,
-        ):
-            ttk.Label(filef, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
-            e = ttk.Entry(filef, width=15)
-            e.insert(0, default)
-            e.grid(row=i, column=1, sticky=tk.W, padx=5)
-            self.file_entries[label] = e
+        self.file_entries: Dict[str, tk.Widget] = {}
 
-        ttk.Button(filef, text="Export Settings", command=self.export_settings).grid(
-            row=i + 1, column=0, sticky=tk.W, pady=(8, 0)
-        )
-        ttk.Button(filef, text="Import Settings", command=self.import_settings).grid(
-            row=i + 1, column=1, sticky=tk.W, pady=(8, 0)
-        )
+        ttk.Label(filef, text=UI.L_DUT).grid(row=1, column=0, sticky=tk.W, pady=2)
+        e_dut = ttk.Entry(filef, width=15); e_dut.insert(0, Defaults().dut)
+        e_dut.grid(row=1, column=1, sticky=tk.W, padx=5); self.file_entries[UI.L_DUT] = e_dut
 
-        # ----- Buttons -----
-        btns = ttk.Frame(left)
-        btns.grid(row=3, column=0, pady=10, sticky=tk.W + tk.E)
-        self.start_btn = ttk.Button(btns, text="Start Measurement", command=self.start_measurement)
+        ttk.Label(filef, text=UI.L_DEV).grid(row=2, column=0, sticky=tk.W, pady=2)
+        e_dev = ttk.Entry(filef, width=15); e_dev.insert(0, Defaults().dev)
+        e_dev.grid(row=2, column=1, sticky=tk.W, padx=5); self.file_entries[UI.L_DEV] = e_dev
+
+        ttk.Label(filef, text=UI.L_VGE).grid(row=3, column=0, sticky=tk.W, pady=2)
+        self.var_vge.set(self.var_smu_v.get())
+        e_vge = ttk.Entry(filef, width=15, textvariable=self.var_vge, state="readonly")
+        e_vge.grid(row=3, column=1, sticky=tk.W, padx=5); self.file_entries[UI.L_VGE] = e_vge
+
+        ttk.Label(filef, text=UI.L_TEMP).grid(row=4, column=0, sticky=tk.W, pady=2)
+        e_temp = ttk.Entry(filef, width=15); e_temp.insert(0, str(Defaults().temp_c))
+        e_temp.grid(row=4, column=1, sticky=tk.W, padx=5); self.file_entries[UI.L_TEMP] = e_temp
+
+        ttk.Label(filef, text=UI.L_NCURVES).grid(row=5, column=0, sticky=tk.W, pady=2)
+        e_ncurves = ttk.Entry(filef, width=15); e_ncurves.insert(0, str(Defaults().ncurves))
+        e_ncurves.grid(row=5, column=1, sticky=tk.W, padx=5); self.file_entries[UI.L_NCURVES] = e_ncurves
+
+        ttk.Button(filef, text="Export Settings", command=self.export_settings).grid(row=6, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Button(filef, text="Import Settings", command=self.import_settings).grid(row=6, column=1, sticky=tk.W, pady=(8, 0))
+
+        btns = ttk.Frame(left); btns.grid(row=3, column=0, pady=10, sticky=tk.W + tk.E)
+        self.start_btn = ttk.Button(btns, text="Start Measurement", command=self.start_measurement, state="disabled")
         self.start_btn.grid(row=0, column=0, padx=5)
         self.stop_btn = ttk.Button(btns, text="Stop", command=self.stop_measurement, state="disabled")
         self.stop_btn.grid(row=0, column=1, padx=5)
         ttk.Button(btns, text="Clear Plot", command=self.clear_plot).grid(row=0, column=2, padx=5)
 
-        # ----- Status -----
         status = ttk.LabelFrame(left, text="Status", padding="10")
-        status.grid(row=4, column=0, sticky=tk.W + tk.E, pady=5)
-        status.columnconfigure(0, weight=1)
+        status.grid(row=4, column=0, sticky=tk.W + tk.E, pady=5); status.columnconfigure(0, weight=1)
         self.status_label = ttk.Label(status, text="Ready", relief=tk.SUNKEN, anchor="w", justify="left")
         self.status_label.grid(row=0, column=0, sticky=tk.E + tk.W)
         self.progress = ttk.Progressbar(status, length=400, mode="determinate")
         self.progress.grid(row=1, column=0, sticky=tk.E + tk.W, pady=(6, 0))
         status.bind("<Configure>", self._on_status_resize)
 
-        # ----- Right side plot -----
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(0, weight=1)
+        right.columnconfigure(0, weight=1); right.rowconfigure(0, weight=1)
         plot_frame = ttk.Frame(right)
         plot_frame.grid(row=0, column=0, sticky=tk.N + tk.S + tk.E + tk.W)
-        plot_frame.columnconfigure(0, weight=1)
-        plot_frame.rowconfigure(0, weight=1)
+        plot_frame.columnconfigure(0, weight=1); plot_frame.rowconfigure(0, weight=1)
 
         self.fig, self.ax = plt.subplots(figsize=(8, 5), dpi=100)
         self._style_axes()
-
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.get_tk_widget().grid(row=0, column=0, sticky=tk.N + tk.S + tk.E + tk.W)
         self.fig.tight_layout()
 
-    # ----- UI helpers -----
+        def _sync_vge(*_):
+            self.var_vge.set(self.var_smu_v.get())
+        self.var_smu_v.trace_add("write", _sync_vge)
+
     def _style_axes(self) -> None:
-        self.ax.clear()
-        self.ax.set_xlabel("Voltage (V)")
-        self.ax.set_ylabel("Current (A)")
-        self.ax.set_title("I-V Measurement Data")
-        self.ax.grid(True)
+        self.ax.clear(); self.ax.set_xlabel("Voltage (V)"); self.ax.set_ylabel("Current (A)")
+        self.ax.set_title("I-V Measurement Data"); self.ax.grid(True)
 
     def _on_status_resize(self, event) -> None:
         try:
@@ -495,35 +498,39 @@ class MeasurementGUI:
             pass
 
     def _set_status(self, message: str) -> None:
-        # Runs on UI thread
-        self.status_label.config(text=message)
-        self.root.update_idletasks()
+        self.status_label.config(text=message); self.root.update_idletasks()
 
     def _set_progress(self, percent: float) -> None:
-        # Runs on UI thread
-        self.progress["value"] = percent
-        self.root.update_idletasks()
+        self.progress["value"] = percent; self.root.update_idletasks()
 
     def _post(self, fn: Callable[[], None]) -> None:
-        # Schedule on main thread
         self.root.after(0, fn)
 
-    # ----- Settings import/export -----
+    def _update_connect_state(self) -> None:
+        both_connected = (self.tek371 is not None) and (self.keithley is not None)
+        self.start_btn.config(state="normal" if both_connected else "disabled")
+        self.warn_label.grid_remove() if both_connected else self.warn_label.grid()
+
     def collect_settings(self) -> Dict:
-        addrs = {
-            UI.K_TEK: self.tek_addr.get(),
-            UI.K_K24: self.keithley_addr.get(),
+        addrs = {UI.K_TEK: self.tek_addr.get(), UI.K_K24: self.keithley_addr.get()}
+        # Use string values from the UI for export (consistent formatting)
+        meas = {
+            UI.L_SMU_V: self.var_smu_v.get(),
+            UI.L_SMU_I_COMP: self.var_i_comp.get(),
+            UI.L_TR_H: self.var_tr_h.get(),
+            UI.L_TR_V: self.var_tr_v.get(),
+            UI.L_TR_VCE: self.var_tr_vce.get(),
+            UI.L_TR_PK_PWR: "300",
         }
-        meas = {label: self.param_entries[label].get() for label in self.param_entries}
         file_set = {
             "output_folder": self.folder_entry.get(),
             UI.L_DUT: self.file_entries[UI.L_DUT].get(),
             UI.L_DEV: self.file_entries[UI.L_DEV].get(),
-            UI.L_VGE: self.file_entries[UI.L_VGE].get(),
+            UI.L_VGE: self.var_vge.get(),
             UI.L_TEMP: self.file_entries[UI.L_TEMP].get(),
             UI.L_NCURVES: self.file_entries[UI.L_NCURVES].get(),
         }
-        base_filename = f"{file_set[UI.L_DUT]}_{file_set[UI.L_DEV]}_{file_set[UI.L_VGE]}V_{file_set[UI.L_TEMP]}C"
+        base_filename = f"{file_set[UI.L_DUT]}_{file_set[UI.L_DEV]}_{self.var_vge.get()}V_{file_set[UI.L_TEMP]}C"
         return {
             "addresses": addrs,
             "measurement": meas,
@@ -537,29 +544,30 @@ class MeasurementGUI:
             if "addresses" in settings:
                 addrs = settings["addresses"]
                 if UI.K_TEK in addrs:
-                    self.tek_addr.delete(0, tk.END)
-                    self.tek_addr.insert(0, addrs[UI.K_TEK])
+                    self.tek_addr.delete(0, tk.END); self.tek_addr.insert(0, addrs[UI.K_TEK])
                 if UI.K_K24 in addrs:
-                    self.keithley_addr.delete(0, tk.END)
-                    self.keithley_addr.insert(0, addrs[UI.K_K24])
-
+                    self.keithley_addr.delete(0, tk.END); self.keithley_addr.insert(0, addrs[UI.K_K24])
             if "measurement" in settings:
                 meas = settings["measurement"]
-                for label, entry in self.param_entries.items():
-                    if label in meas:
-                        entry.delete(0, tk.END)
-                        entry.insert(0, str(meas[label]))
-
+                if UI.L_SMU_V in meas: self.var_smu_v.set(str(meas[UI.L_SMU_V]))
+                if UI.L_SMU_I_COMP in meas: self.var_i_comp.set(str(meas[UI.L_SMU_I_COMP]))
+                if UI.L_TR_H in meas and str(meas[UI.L_TR_H]) in H_CHOICES: self.var_tr_h.set(str(meas[UI.L_TR_H]))
+                if UI.L_TR_V in meas and str(meas[UI.L_TR_V]) in V_CHOICES: self.var_tr_v.set(str(meas[UI.L_TR_V]))
+                if UI.L_TR_VCE in meas: self.var_tr_vce.set(str(meas[UI.L_TR_VCE]))
             if "file" in settings:
                 fs = settings["file"]
                 if "output_folder" in fs:
-                    self.folder_entry.delete(0, tk.END)
-                    self.folder_entry.insert(0, fs["output_folder"])
-                for label, entry in self.file_entries.items():
-                    if label in fs:
-                        entry.delete(0, tk.END)
-                        entry.insert(0, str(fs[label]))
-
+                    self.folder_entry.delete(0, tk.END); self.folder_entry.insert(0, fs["output_folder"])
+                if UI.L_DUT in fs:
+                    w = self.file_entries[UI.L_DUT]; w.delete(0, tk.END); w.insert(0, str(fs[UI.L_DUT]))
+                if UI.L_DEV in fs:
+                    w = self.file_entries[UI.L_DEV]; w.delete(0, tk.END); w.insert(0, str(fs[UI.L_DEV]))
+                if UI.L_TEMP in fs:
+                    w = self.file_entries[UI.L_TEMP]; w.delete(0, tk.END); w.insert(0, str(fs[UI.L_TEMP]))
+                if UI.L_NCURVES in fs:
+                    w = self.file_entries[UI.L_NCURVES]; w.delete(0, tk.END); w.insert(0, str(fs[UI.L_NCURVES]))
+                if UI.L_VGE in fs:
+                    self.var_smu_v.set(str(fs[UI.L_VGE]))
             self._set_status("Settings applied successfully")
         except Exception as e:
             messagebox.showerror("Apply Settings Error", str(e))
@@ -568,12 +576,8 @@ class MeasurementGUI:
         try:
             data = self.collect_settings()
             default_name = f"settings_{data['file'][UI.L_DUT]}_{data['file'][UI.L_DEV]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            path = filedialog.asksaveasfilename(
-                title="Export Settings",
-                defaultextension=".json",
-                filetypes=[("JSON files", "*.json")],
-                initialfile=default_name,
-            )
+            path = filedialog.asksaveasfilename(title="Export Settings", defaultextension=".json",
+                                                filetypes=[("JSON files", "*.json")], initialfile=default_name)
             if path:
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2)
@@ -592,20 +596,15 @@ class MeasurementGUI:
         except Exception as e:
             messagebox.showerror("Import Settings Error", str(e))
 
-    # ----- Device ops -----
     def scan_gpib(self) -> None:
         try:
-            rm = pyvisa.ResourceManager()
-            resources = rm.list_resources()
+            rm = pyvisa.ResourceManager(); resources = rm.list_resources()
             gpib_devices = [r for r in resources if "GPIB" in r]
-            self.gpib_text.config(state="normal")
-            self.gpib_text.delete(1.0, tk.END)
+            self.gpib_text.config(state="normal"); self.gpib_text.delete(1.0, tk.END)
             if gpib_devices:
-                self.gpib_text.insert(tk.END, "\n".join(gpib_devices))
-                self._set_status(f"Found {len(gpib_devices)} GPIB device(s)")
+                self.gpib_text.insert(tk.END, "\n".join(gpib_devices)); self._set_status(f"Found {len(gpib_devices)} GPIB device(s)")
             else:
-                self.gpib_text.insert(tk.END, "No GPIB devices found")
-                self._set_status("No GPIB devices found")
+                self.gpib_text.insert(tk.END, "No GPIB devices found"); self._set_status("No GPIB devices found")
             self.gpib_text.config(state="disabled")
         except Exception as e:
             messagebox.showerror("Error scanning GPIB", str(e))
@@ -613,9 +612,7 @@ class MeasurementGUI:
     def connect_tek(self) -> None:
         try:
             self._set_status("Connecting to Tek371...")
-            addr = self.tek_addr.get()
-            self.tek371 = Tek371(addr)
-            idn = None
+            addr = self.tek_addr.get(); self.tek371 = Tek371(addr)
             try:
                 idn = self.tek371.id_string()
             except Exception:
@@ -628,13 +625,13 @@ class MeasurementGUI:
             self.tek_status.config(text="Error", foreground="red")
             messagebox.showerror("Tek371 Connection Error", str(e))
             self._set_status("Tek371 connection failed")
+        finally:
+            self._update_connect_state()
 
     def connect_keithley(self) -> None:
         try:
             self._set_status("Connecting to Keithley 2400...")
-            addr = self.keithley_addr.get()
-            self.keithley = Keithley2400(addr)
-            idn = None
+            addr = self.keithley_addr.get(); self.keithley = Keithley2400(addr)
             try:
                 idn = getattr(self.keithley, "idn", None) or getattr(self.keithley, "id", None)
                 if not idn:
@@ -649,55 +646,38 @@ class MeasurementGUI:
             self.keithley_status.config(text="Error", foreground="red")
             messagebox.showerror("Keithley 2400 Connection Error", str(e))
             self._set_status("Keithley connection failed")
+        finally:
+            self._update_connect_state()
 
-    # ----- Plot ops -----
     def clear_plot(self) -> None:
-        self._style_axes()
-        self.fig.tight_layout()
-        self.canvas.draw()
-        self._set_status("Plot cleared")
-        self._set_progress(0.0)
+        self._style_axes(); self.fig.tight_layout(); self.canvas.draw(); self._set_status("Plot cleared"); self._set_progress(0.0)
 
     def _plot_csv(self, path: Path) -> None:
-        # Runs on UI thread
         try:
             data = pd.read_csv(path)
             self.ax.plot(data.iloc[:, 0], data.iloc[:, 1], alpha=0.5, linewidth=1, color="blue")
-            self.fig.tight_layout()
-            self.canvas.draw()
+            self.fig.tight_layout(); self.canvas.draw()
         except Exception as e:
             print(f"Plot error ({path.name}): {e}")
 
     def _plot_mean_csv(self, path: Path) -> None:
-        # Runs on UI thread
         try:
             data = pd.read_csv(path)
             self.ax.plot(data.iloc[:, 0], data.iloc[:, 1], "r-", linewidth=1.5, label="Mean")
-            self.ax.legend()
-            self.fig.tight_layout()
-            self.canvas.draw()
+            self.ax.legend(); self.fig.tight_layout(); self.canvas.draw()
         except Exception as e:
             print(f"Plot mean error ({path.name}): {e}")
 
-    # ----- Run / Stop -----
     def _parse_settings(self) -> RunSettings:
-        # Addresses
-        addrs = AddressSettings(
-            tek371=self.tek_addr.get(),
-            keithley2400=self.keithley_addr.get(),
-        )
-
-        # Measurement params
+        addrs = AddressSettings(tek371=self.tek_addr.get(), keithley2400=self.keithley_addr.get())
         p = MeasurementParams(
-            smu_v=float(self.param_entries[UI.L_SMU_V].get()),
-            smu_i_comp=float(self.param_entries[UI.L_SMU_I_COMP].get()),
-            tr_h=float(self.param_entries[UI.L_TR_H].get()),
-            tr_v=float(self.param_entries[UI.L_TR_V].get()),
-            tr_vce_pct=float(self.param_entries[UI.L_TR_VCE].get()),
-            tr_peak_power=int(self.param_entries[UI.L_TR_PK_PWR].get()),
+            smu_v=float(self.var_smu_v.get()),
+            smu_i_comp_mA=float(self.var_i_comp.get()),
+            tr_h=float(self.var_tr_h.get()),
+            tr_v=float(self.var_tr_v.get()),
+            tr_vce_pct=float(self.var_tr_vce.get()),
+            tr_peak_power=300,
         )
-
-        # File params
         folder = self.folder_entry.get()
         if not folder:
             raise ValueError("Please select an output folder")
@@ -705,71 +685,46 @@ class MeasurementGUI:
             output_folder=Path(folder),
             dut=self.file_entries[UI.L_DUT].get(),
             dev=self.file_entries[UI.L_DEV].get(),
-            vge=float(self.file_entries[UI.L_VGE].get()),
+            vge=float(self.var_vge.get()),
             temp_c=float(self.file_entries[UI.L_TEMP].get()),
             ncurves=int(self.file_entries[UI.L_NCURVES].get()),
         )
         return RunSettings(addresses=addrs, measurement=p, file=f)
 
     def start_measurement(self) -> None:
-        # Basic connection checks
         if self.tek371 is None or self.keithley is None:
-            messagebox.showerror("Error", "Please connect both devices before starting!")
-            return
-
+            self._update_connect_state(); return
         try:
-            settings = self._parse_settings()
-            settings.validate()
+            settings = self._parse_settings(); settings.validate()
         except Exception as e:
-            messagebox.showerror("Invalid Parameters", str(e))
-            return
-
+            messagebox.showerror("Invalid Parameters", str(e)); return
         self.controller = MeasurementController(self.tek371, self.keithley)
-        self.start_btn.config(state="disabled")
-        self.stop_btn.config(state="normal")
+        self.start_btn.config(state="disabled"); self.stop_btn.config(state="normal")
 
-        # Wrap controller callbacks to main thread via ._post(...)
-        def on_status(msg: str) -> None:
-            self._post(lambda: self._set_status(msg))
-
-        def on_progress(pct: float) -> None:
-            self._post(lambda: self._set_progress(pct))
-
-        def on_plot_csv(path: Path) -> None:
-            self._post(lambda: self._plot_csv(path))
-
-        def on_plot_mean_csv(path: Path) -> None:
-            self._post(lambda: self._plot_mean_csv(path))
+        def on_status(msg: str) -> None: self._post(lambda: self._set_status(msg))
+        def on_progress(pct: float) -> None: self._post(lambda: self._set_progress(pct))
+        def on_plot_csv(path: Path) -> None: self._post(lambda: self._plot_csv(path))
+        def on_plot_mean_csv(path: Path) -> None: self._post(lambda: self._plot_mean_csv(path))
 
         def work():
             try:
                 self.controller.run(settings, on_status, on_progress, on_plot_csv, on_plot_mean_csv)
             except Exception as e:
-                # Report errors on UI thread
                 self._post(lambda: (self._set_status("Measurement error"), messagebox.showerror("Measurement Error", str(e))))
             finally:
-                # Restore buttons on UI thread
                 self._post(lambda: (self.start_btn.config(state="normal"), self.stop_btn.config(state="disabled")))
-
-        self.worker_thread = Thread(target=work, daemon=True)
-        self.worker_thread.start()
+        self.worker_thread = Thread(target=work, daemon=True); self.worker_thread.start()
 
     def stop_measurement(self) -> None:
-        if self.controller:
-            self.controller.stop()
+        if self.controller: self.controller.stop()
         self._set_status("Stopping measurement...")
 
-    # ----- File dialogs -----
     def browse_folder(self) -> None:
         folder = filedialog.askdirectory()
         if folder:
-            self.folder_entry.delete(0, tk.END)
-            self.folder_entry.insert(0, folder)
+            self.folder_entry.delete(0, tk.END); self.folder_entry.insert(0, folder)
 
 
-# =========================
-# 6) Main
-# =========================
 if __name__ == "__main__":
     root = tk.Tk()
     app = MeasurementGUI(root)
