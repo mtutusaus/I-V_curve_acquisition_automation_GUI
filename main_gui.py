@@ -272,7 +272,7 @@ class MeasurementController:
                     raise TimeoutError(f"Sweep {i}/{N} timed out")
 
                 # Save CSV & plot
-                filename = folder / f"{base}_{i}.csv"
+                filename = folder / (f"{base}.csv" if N == 1 else f"{base}_{i}.csv")
                 self.tek.read_curve(str(filename))
                 on_plot_csv(filename)
 
@@ -284,9 +284,10 @@ class MeasurementController:
 
             # Compute and plot mean if not stopped
             if not self._stop_event.is_set():
-                on_status(UI.STATUS_MEAN)
-                mean_path = compute_mean_file(folder, base, N)
-                on_plot_mean_csv(mean_path)
+                if N > 1:
+                    on_status(UI.STATUS_MEAN)
+                    mean_path = compute_mean_file(folder, base, N)
+                    on_plot_mean_csv(mean_path)
                 on_status(UI.STATUS_DONE.format(folder=folder))
                 on_progress(100.0)
 
