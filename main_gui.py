@@ -936,6 +936,9 @@ class MeasurementGUI:
                 pass
         if sp is not None:
             self._heat_setpoint_line = self.ax_heat.axhline(sp, color='orange', linestyle='--', linewidth=1.3, label='Setpoint')
+            # Make sure the setpoint line does NOT affect autoscaling
+            self._heat_setpoint_line.set_zorder(0)
+            self._heat_setpoint_line.set_alpha(0.9)
             handles, labels = self.ax_heat.get_legend_handles_labels()
             if 'Setpoint' in labels:
                 self.ax_heat.legend(loc='upper right')
@@ -1429,6 +1432,17 @@ class MeasurementGUI:
         self._draw_setpoint_line()
         self._set_tsep_status("Heating plot cleared")
 
+    def _update_y_limits_from_data(self) -> None:
+        """Set Y-axis limits based on current Tj values, ignoring the setpoint line."""
+        if not self._heat_tj_values:
+            return
+        ymin = min(self._heat_tj_values)
+        ymax = max(self._heat_tj_values)
+        # Ensure non-zero span and add padding
+        span = max(1e-6, ymax - ymin)
+        pad = max(0.5, 0.08 * span)
+        self.ax_heat.set_ylim(ymin - pad, ymax + pad)
+
     def _heating_measure_loop(self, params: TSEPParams, duration_s: int, on_status, on_progress):
         ctrl = TSEPController()
         try:
@@ -1454,7 +1468,6 @@ class MeasurementGUI:
             ctrl.smu_vge.enable_source()
             on_status("Enabling VCE...")
             ctrl.smu_vce.enable_source()
-            # Updated status for clarity
             on_status("Measuring heating period...")
 
             self.heat_start_time = t0 = time.time()
@@ -1495,7 +1508,8 @@ class MeasurementGUI:
                     except Exception:
                         self.heat_scatter = self.ax_heat.scatter(self._heat_times, self._heat_tj_values, s=12, c='red', marker='o', label='Tj')
                         self.ax_heat.legend(loc='upper right')
-                    self.ax_heat.relim(); self.ax_heat.autoscale_view()
+                    # Update Y limits from data (ignore setpoint line)
+                    self._update_y_limits_from_data()
                     self.canvas_heat.draw()  # force draw for reliability
                     self.var_tsep_tj.set(f"{tj:.3f}")
                 self._post(_upd)
