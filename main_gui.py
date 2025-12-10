@@ -21,6 +21,11 @@ from tek371 import Tek371
 from pymeasure.instruments.keithley import Keithley2400
 
 warnings.filterwarnings("ignore", message="read string doesn't end with termination characters")
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("iv-gui")
+
 
 
 class UI:
@@ -115,6 +120,10 @@ def ensure_folder_writable(path: Path) -> None:
             test_file.unlink(missing_ok=True)
         except Exception:
             pass
+
+def make_curve_filename(base: str, i: int, n: int, folder: Path) -> Path:
+    """Return per-curve CSV path (no _1 when n==1)."""
+    return folder / (f"{base}.csv" if n == 1 else f"{base}_{i}.csv")
 
 
 def compute_mean_file(folder_path: Path, base_name: str, N: int) -> Path:
@@ -272,7 +281,7 @@ class MeasurementController:
                     raise TimeoutError(f"Sweep {i}/{N} timed out")
 
                 # Save CSV & plot
-                filename = folder / (f"{base}.csv" if N == 1 else f"{base}_{i}.csv")
+                filename = make_curve_filename(base, i, N, folder)
                 self.tek.read_curve(str(filename))
                 on_plot_csv(filename)
 
@@ -282,7 +291,7 @@ class MeasurementController:
 
                 on_progress((i / N) * 100.0)
 
-            # Compute and plot mean if not stopped
+            # Compute and plot mean if not stopped (only when N > 1)
             if not self._stop_event.is_set():
                 if N > 1:
                     on_status(UI.STATUS_MEAN)
@@ -715,7 +724,7 @@ class MeasurementGUI:
             self.ax.plot(data.iloc[:, 0], data.iloc[:, 1], alpha=0.5, linewidth=1, color="blue")
             self.fig.tight_layout(); self.canvas.draw()
         except Exception as e:
-            print(f"Plot error ({path.name}): {e}")
+            logger.exception(f"Plot error ({path.name}): {e}")
 
     def _plot_mean_csv(self, path: Path) -> None:
         try:
@@ -723,7 +732,7 @@ class MeasurementGUI:
             self.ax.plot(data.iloc[:, 0], data.iloc[:, 1], "r-", linewidth=1.5, label="Mean")
             self.ax.legend(); self.fig.tight_layout(); self.canvas.draw()
         except Exception as e:
-            print(f"Plot mean error ({path.name}): {e}")
+            logger.exception(f"Plot mean error ({path.name}): {e}")
 
     # ----- Run / Stop -----
     def build_settings(self) -> RunSettings:
