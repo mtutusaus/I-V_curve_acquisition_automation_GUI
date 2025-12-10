@@ -10,6 +10,9 @@ import threading
 import csv
 
 
+import logging
+logger = logging.getLogger(__name__)
+
 class Tek371:
     """Driver class for Tektronix 371 Curve Tracer using PyVISA."""
 
@@ -620,6 +623,7 @@ class Tek371:
 
         # Check if we received and parsed correctly the measured waveform
         if len(points) != nr_pt:
+            logger.error("Parsed points mismatch: got %s, expected %s", len(points), nr_pt)
             raise ValueError(f"Number of points parsed ({len(points)}) does not match expected ({nr_pt}).")
 
         # Save scaled points to CSV
@@ -628,7 +632,7 @@ class Tek371:
             writer.writerow(["Voltage (V)", "Current (A)"])
             writer.writerows(points)
 
-        print(f"  Curve saved to {filename}")
+        logger.info(f"Curve saved to {filename}")
 
     def read_preamble(self) -> str:
         return self.query(cmd.WFM_QUERY)
