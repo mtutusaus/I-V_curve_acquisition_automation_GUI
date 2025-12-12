@@ -76,8 +76,8 @@ class UI:
     TSEP_CONNECT_VGE = "Connect"
     TSEP_CONNECT_VCE = "Connect"
 
-    TSEP_VGE_SECTION = "VGE Settings"
-    TSEP_VCE_SECTION = "VCE Settings"
+    TSEP_VGE_SECTION = "Gate bias settings"
+    TSEP_VCE_SECTION = "Biasing current settings"
     TSEP_OUTPUTS = "Outputs"
 
     TSEP_VGE_V = "Gate bias voltage (V):"
@@ -598,7 +598,7 @@ class MeasurementGUI:
 
         # Heating period vars
         self.var_heat_minutes = tk.StringVar(value='15')
-        self.var_setpoint_c = tk.StringVar(value='130')
+        self.var_setpoint_c = tk.StringVar(value='30')
         self.heating_running: bool = False
         self.heating_thread: Optional[Thread] = None
         self._heat_stop = Event()
