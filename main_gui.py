@@ -244,8 +244,8 @@ class MeasurementParams:
             raise ValueError(f"{UI.L_TR_V} must be one of {sorted(ALLOWED_V)} A/div (got {self.tr_v}).")
         if not (0.0 <= self.tr_vce_pct <= 100.0):
             raise ValueError(f"{UI.L_TR_VCE} must be between 0 and 100 (got {self.tr_vce_pct}).")
-        if self.tr_peak_power != 300:
-            raise ValueError("Peak power is fixed to 300 W for this GUI.")
+        if self.tr_peak_power not in (300, 3000):
+            raise ValueError("Peak power must be 300 or 3000 W.")
 
     @property
     def smu_i_comp_A(self) -> float:
@@ -387,7 +387,7 @@ class MeasurementController:
     def _configure_tek(self, settings: RunSettings) -> None:
         p = settings.measurement
         self.tek.initialize()
-        self.tek.set_peak_power(300)  # fixed
+        self.tek.set_peak_power(p.tr_peak_power)
         self.tek.set_step_number(0)
         if p.gate_source == GATE_SRC_INTERNAL:
             self.tek.set_step_voltage(p.step_voltage)
@@ -703,8 +703,9 @@ class MeasurementGUI:
         self.sb_vce = tk.Spinbox(param, from_=0, to=100, increment=1, width=12, textvariable=self.var_tr_vce)
         self.sb_vce.grid(row=2, column=1, sticky=tk.W, padx=5)
         ttk.Label(param, text=UI.L_TR_PK_PWR).grid(row=3, column=0, sticky=tk.W, pady=2)
-        self.lbl_pp = ttk.Label(param, text="300", foreground="#333")
-        self.lbl_pp.grid(row=3, column=1, sticky=tk.W, padx=5)
+        self.var_tr_peak_power = tk.StringVar(value="300")
+        self.cb_tr_peak_power = ttk.Combobox(param, values=("300", "3000"), width=11, state="readonly", textvariable=self.var_tr_peak_power)
+        self.cb_tr_peak_power.grid(row=3, column=1, sticky=tk.W, padx=5)
 
         # ----- File Settings -----
         filef = ttk.LabelFrame(left, text="File Settings", padding="10")
@@ -1014,7 +1015,7 @@ class MeasurementGUI:
             UI.L_TR_H: self.var_tr_h.get(),
             UI.L_TR_V: self.var_tr_v.get(),
             UI.L_TR_VCE: self.var_tr_vce.get(),
-            UI.L_TR_PK_PWR: "300",
+UI.L_TR_PK_PWR: self.var_tr_peak_power.get(),
             "Gate Bias Source": self.var_gate_source.get(),
             "Step Voltage (V)": self.var_step_voltage.get(),
             "Step Offset": self.var_step_offset.get(),
@@ -1065,6 +1066,7 @@ class MeasurementGUI:
                 if UI.L_TR_H in meas and str(meas[UI.L_TR_H]) in H_CHOICES: self.var_tr_h.set(str(meas[UI.L_TR_H]))
                 if UI.L_TR_V in meas and str(meas[UI.L_TR_V]) in V_CHOICES: self.var_tr_v.set(str(meas[UI.L_TR_V]))
                 if UI.L_TR_VCE in meas: self.var_tr_vce.set(str(meas[UI.L_TR_VCE]))
+                if UI.L_TR_PK_PWR in meas: self.var_tr_peak_power.set(str(meas[UI.L_TR_PK_PWR]))
                 if "Gate Bias Source" in meas: self.var_gate_source.set(str(meas["Gate Bias Source"]))
                 if "Step Voltage (V)" in meas: self.var_step_voltage.set(str(meas["Step Voltage (V)"]))
                 if "Step Offset" in meas: self.var_step_offset.set(str(meas["Step Offset"]))
@@ -1262,7 +1264,7 @@ class MeasurementGUI:
             tr_h=float(self.var_tr_h.get()),
             tr_v=float(self.var_tr_v.get()),
             tr_vce_pct=float(self.var_tr_vce.get()),
-            tr_peak_power=300,
+            tr_peak_power=int(self.var_tr_peak_power.get()),
             gate_source=self.var_gate_source.get(),
             step_voltage=float(self.var_step_voltage.get()) if self.var_gate_source.get() == GATE_SRC_INTERNAL else 0.0,
             step_offset=float(self.var_step_offset.get()) if self.var_gate_source.get() == GATE_SRC_INTERNAL else 0.0,
@@ -1520,10 +1522,12 @@ class MeasurementGUI:
             on_progress(100.0)
         finally:
             try:
+                ctrl.smu_vce.beep(4000, 2)
                 ctrl.smu_vce.disable_source()
             except Exception:
                 pass
             try:
+                ctrl.smu_vge.beep(4000, 2)
                 ctrl.smu_vge.disable_source()
             except Exception:
                 pass
@@ -1585,6 +1589,8 @@ class MeasurementGUI:
             try:
                 self._heating_measure_loop(p, duration_s, on_status, on_progress)
                 self._post(lambda: self._set_tsep_status("Heating measurement complete"))
+            except Exception:
+                pass
             except Exception as e:
                 self._post(lambda: (self._set_tsep_status("Heating error"), self._show_error("Heating Error", e)))
             finally:
